@@ -1,0 +1,23 @@
+name = "fui"
+version = "0.1.0"
+license = "MIT"
+author = "fui contributors"
+maintainer = "fui contributors"
+copyright = "2026 fui contributors"
+description = "Immediate-mode GUI framework in pure Fortran (no C bindings, no platform dependencies)"
+keywords = ["gui", "ui", "immediate-mode", "imgui", "fortran"]
+categories = ["graphics"]
+
+[build]
+auto-executables = false
+auto-tests = false
+
+[[executable]]
+name = "demo"
+source-dir = "app"
+main = "main.f90"
+
+[fortran]
+implicit-typing = false
+implicit-external = false
+source-form = "free"
