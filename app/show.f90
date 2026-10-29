@@ -139,6 +139,8 @@ program show
       call app%apply_theme(th)
 
       call app%begin_frame(inp)
+      ! the blurred, animated wallpaper is the app background
+      call app%dl%backdrop(0.0_wp, 0.0_wp, real(plat%width, wp), real(plat%height, wp))
 
 
       if (use_root) then

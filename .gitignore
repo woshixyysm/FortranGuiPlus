@@ -1,0 +1,11 @@
+out/
+*.mod
+*.o
+*.obj
+*.exe
+*.dll
+fpm.toml.bak
+.vscode/
+__pycache__/
+frames/
+

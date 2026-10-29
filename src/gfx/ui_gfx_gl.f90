@@ -21,6 +21,7 @@ module ui_gfx_gl
    integer(c_int), parameter :: GL_TEXTURE_2D = int(z'0DE1', c_int)
    integer(c_int), parameter :: GL_TEXTURE0 = int(z'84C0', c_int)
    integer(c_int), parameter :: GL_TEXTURE1 = int(z'84C1', c_int)
+   integer(c_int), parameter :: GL_TEXTURE2 = int(z'84C2', c_int)
    integer(c_int), parameter :: GL_RGBA_C = int(z'1908', c_int)
    integer(c_int), parameter :: GL_R8 = int(z'8229', c_int)
    integer(c_int), parameter :: GL_RED = int(z'1903', c_int)
@@ -299,15 +300,13 @@ module ui_gfx_gl
    procedure(if_uniform4f), pointer, save :: p_uniform4f => null()
    procedure(if_get_string), pointer, save :: p_get_string => null()
    procedure(if_get_log), pointer, save :: p_get_log => null()
-   !> Scene copy used by glass: full res texture + single sample target.
-   integer(c_int), save :: g_scene_fbo = 0, g_scene_tex = 0
-   integer, save :: g_scene_w = 0, g_scene_h = 0
 
    integer(c_int), save, target :: g_prog = 0
    integer(c_int), save, target :: g_vao = 0
    integer(c_int), save, target :: g_vbo = 0
    integer(c_int), save, target :: g_tex = 0
    integer, save :: g_u_tex = -1, g_u_bg = -1, g_u_screen = -1
+   integer, save :: g_u_wall_bg = -1
    integer, save :: g_u_glass = -1, g_u_glass_r = -1, g_u_time = -1
    logical, save :: g_ready = .false.
    logical, save :: g_first = .true.
@@ -324,7 +323,7 @@ module ui_gfx_gl
    integer, save :: g_u_wall_time = -1, g_u_wall_res = -1
    integer, save :: g_u_blur_tex = -1, g_u_blur_dir = -1
    integer(c_int), save :: g_bg_fbo = 0, g_bg_fbo2 = 0
-   integer(c_int), save :: g_bg_tex = 0, g_bg_tmp = 0
+   integer(c_int), save :: g_bg_tex = 0, g_bg_tmp = 0, g_wall_tex = 0
    integer, save :: g_bgw = 0, g_bgh = 0
    real(c_float), save :: g_time = 0.0_c_float
 
@@ -337,7 +336,6 @@ module ui_gfx_gl
       procedure :: shutdown => gl_shutdown
       procedure :: name => gl_name
       procedure :: resolve => gl_resolve
-      procedure :: capture => gl_capture
    end type ui_gl_backend
 
    character(len=*), parameter :: VS_SRC = &
@@ -359,6 +357,7 @@ module ui_gfx_gl
       'in vec2 vLoc; in vec3 vShape;'//char(10)// &
       'uniform sampler2D uTex;'//char(10)// &
       'uniform sampler2D uBg;'//char(10)// &
+      'uniform sampler2D uWall;'//char(10)// &
       'uniform vec2 uScreen;'//char(10)// &
       'uniform vec4 uGlass;'//char(10)// &
       'uniform float uGlassR;'//char(10)// &
@@ -375,11 +374,38 @@ module ui_gfx_gl
       '    return;'//char(10)// &
       '  }'//char(10)// &
       '  vec2 uv = gl_FragCoord.xy/uScreen;'//char(10)// &
-      '  if (vMode > 1.5) { oCol = vec4(texture(uBg,uv).rgb,1.0); return; }'//char(10)// &
-      '  // DkoBot/ImGui-Gaussian-Blur model: the blurred scene IS the glass.'//char(10)// &
-      '  // Draw it as a rounded image with a tint, alpha = how much tint.'//char(10)// &
-      '  vec3 s = texture(uBg, uv).rgb;'//char(10)// &
-      '  oCol = vec4(s * vCol.rgb, vCol.a);'//char(10)// &
+      '  if (vMode > 1.5) { oCol = vec4(texture(uWall,uv).rgb,1.0); return; }'//char(10)// &
+      '  // rounded box SDF: the glass outline in framebuffer space'//char(10)// &
+      '  vec2 hf = vShape.xy;'//char(10)// &
+      '  vec2 q = vLoc;'//char(10)// &
+      '  vec2 b = abs(q) - (hf - vec2(vShape.z));'//char(10)// &
+      '  float sd = length(max(b,vec2(0.0))) + min(max(b.x,b.y),0.0) - vShape.z;'//char(10)// &
+      '  float inside = max(-sd,0.0);'//char(10)// &
+      '  vec2 g;'//char(10)// &
+      '  if (b.x > 0.0 && b.y > 0.0) g = sign(q)*normalize(b);'//char(10)// &
+      '  else if (b.x > b.y) g = vec2(sign(q.x),0.0);'//char(10)// &
+      '  else g = vec2(0.0,sign(q.y));'//char(10)// &
+      '  // Displacement lives in a tight band along the border, nothing else.'//char(10)// &
+      '  // Upstream defaults (rdev/liquid-glass-react): scale 70px, blur 0.0625,'//char(10)// &
+      '  // saturate 140%, aberration 2px. No noise: liquid glass is clean.'//char(10)// &
+      '  float edge = 1.0 - smoothstep(0.0, 34.0, inside);'//char(10)// &
+      '  float bend = edge*edge;'//char(10)// &
+      '  float s = bend*70.0;'//char(10)// &
+      '  vec2 base = (gl_FragCoord.xy)/uScreen;'//char(10)// &
+      '  vec3 bg;'//char(10)// &
+      '  bg.r = texture(uBg, base + g*(s - 2.0*edge)/uScreen).r;'//char(10)// &
+      '  bg.g = texture(uBg, base + g*s/uScreen).g;'//char(10)// &
+      '  bg.b = texture(uBg, base + g*(s + 2.0*edge)/uScreen).b;'//char(10)// &
+      '  // saturate(140%): this is what makes it read as glass, not as paint'//char(10)// &
+      '  float luma = dot(bg, vec3(0.2126,0.7152,0.0722));'//char(10)// &
+      '  bg = clamp(mix(vec3(luma), bg, 1.40), 0.0, 1.0);'//char(10)// &
+      '  // one thin highlight, only on the side facing the light'//char(10)// &
+      '  vec2 L2 = normalize(vec2(-0.62,0.78));'//char(10)// &
+      '  float facing = clamp(dot(normalize(g + vec2(1e-5)), L2), 0.0, 1.0);'//char(10)// &
+      '  float line = smoothstep(1.6, 0.0, inside);'//char(10)// &
+      '  vec3 col = mix(bg, vCol.rgb, vCol.a);'//char(10)// &
+      '  col += vec3(line*facing*0.34);'//char(10)// &
+      '  oCol = vec4(col,1.0);'//char(10)// &
       '}'//char(10)
 
    !> Pass-through vertex shader for full screen passes.
@@ -411,6 +437,7 @@ module ui_gfx_gl
       '  vec3 col = mix(a,b, smoothstep(0.22,0.86,f));'//char(10)// &
       '  col = mix(col, c, smoothstep(0.55,1.0, fbm(p*0.7 + vec2(-0.8*t,t))));'//char(10)// &
       '  col *= 0.72 + 0.38*vUV.y;'//char(10)// &
+      '  oCol = vec4(col, 1.0);'//char(10)// &
       '}'//char(10)
 
    !> One separable Gaussian pass (9 taps, sigma ~ 2.2 texels).
@@ -586,6 +613,7 @@ contains
       g_u_tex = int(p_get_uniform(g_prog, cstr('uTex')))
       g_u_bg = int(p_get_uniform(g_prog, cstr('uBg')))
       g_u_screen = int(p_get_uniform(g_prog, cstr('uScreen')))
+      g_u_wall_bg = int(p_get_uniform(g_prog, cstr('uWall')))
       g_u_glass = int(p_get_uniform(g_prog, cstr('uGlass')))
       g_u_glass_r = int(p_get_uniform(g_prog, cstr('uGlassR')))
       g_u_time = int(p_get_uniform(g_prog, cstr('uTime')))
@@ -695,24 +723,6 @@ contains
       call p_clear_color(0.094_c_float, 0.102_c_float, 0.122_c_float, 1.0_c_float)
       call bg_render(width, height)
       call p_clear(GL_COLOR_BUFFER_BIT)
-      ! The animated wallpaper is painted straight onto the frame. Sampling a
-      ! texture for this was fragile (and blacked out completely when the
-      ! capture path broke), so the background no longer depends on it.
-      if (g_time < 0.02_c_float) then
-         open (77, file='gl_dbg.txt', status='replace')
-         write (77, '(a,i0,a,i0,a,i0,a,i0)') 'wallp=', g_wallp, ' blur=', g_blurp, &
-            ' tex=', g_bg_tex, ' err=', int(p_get_error())
-         close (77)
-      end if
-      if (g_wallp /= 0) then
-         call p_use(g_wallp)
-         g_time = g_time + 0.016_c_float
-         if (g_u_wall_time >= 0) call p_uniform1f(int(g_u_wall_time, c_int), g_time)
-         if (g_u_wall_res >= 0) call p_uniform2f(int(g_u_wall_res, c_int), &
-                                                 real(width*g_ss, c_float), &
-                                                 real(height*g_ss, c_float))
-         call draw_quad(g_wallp)
-      end if
    end subroutine gl_begin
 
    subroutine gl_draw(self, batch)
@@ -734,8 +744,11 @@ contains
       if (g_u_tex >= 0) call p_uniform1i(int(g_u_tex, c_int), 0_c_int)
       call p_active_tex(GL_TEXTURE1)
       call p_bind_tex(GL_TEXTURE_2D, g_bg_tex)
+      call p_active_tex(GL_TEXTURE2)
+      call p_bind_tex(GL_TEXTURE_2D, g_wall_tex)
       call p_active_tex(GL_TEXTURE0)
       if (g_u_bg >= 0) call p_uniform1i(int(g_u_bg, c_int), 1_c_int)
+      if (g_u_wall_bg >= 0) call p_uniform1i(int(g_u_wall_bg, c_int), 2_c_int)
       if (g_u_screen >= 0) call p_uniform2f(int(g_u_screen, c_int), &
          real(self%width*g_ss, c_float), real(self%height*g_ss, c_float))
       if (g_u_glass >= 0) then
@@ -758,75 +771,6 @@ contains
       if (.false.) print *, self%width
    end subroutine gl_draw
 
-   subroutine gl_capture(self, width, height)
-      class(ui_gl_backend), intent(inout) :: self
-      integer, intent(in) :: width, height
-      integer :: i
-
-      if (.not. g_ready) return
-      if (.not. associated(p_attach_tex)) return
-
-      ! 1. give the scene its own colour texture at full resolution
-      if (g_scene_tex == 0) then
-         call p_gen_tex(1_c_int, g_scene_tex)
-         call p_gen_fbo(1_c_int, g_scene_fbo)
-      end if
-      if (g_scene_w /= width .or. g_scene_h /= height) then
-         g_scene_w = width
-         g_scene_h = height
-         call p_bind_tex(GL_TEXTURE_2D, g_scene_tex)
-         call p_tex_param(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_F)
-         call p_tex_param(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR_F)
-         call p_tex_param(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
-         call p_tex_param(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
-         call p_tex_image(GL_TEXTURE_2D, 0_c_int, GL_RGBA8, &
-                          int(width, c_int), int(height, c_int), 0_c_int, &
-                          GL_RGBA_C, GL_UNSIGNED_BYTE, c_null_ptr)
-         call p_bind_tex(GL_TEXTURE_2D, 0_c_int)
-         call p_bind_fbo(GL_FRAMEBUFFER, g_scene_fbo)
-         call p_attach_tex(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, &
-                           g_scene_tex, 0_c_int)
-      end if
-
-      ! 2. resolve the multisampled frame into it
-      call p_bind_fbo(GL_READ_FRAMEBUFFER, g_fbo)
-      call p_bind_fbo(GL_DRAW_FRAMEBUFFER, g_scene_fbo)
-      call p_blit(0_c_int, 0_c_int, int(width, c_int), int(height, c_int), &
-                  0_c_int, 0_c_int, int(width, c_int), int(height, c_int), &
-                  GL_COLOR_BUFFER_BIT, GL_NEAREST_F)
-
-      ! 3. blur it: H into g_bg_tmp, V back into g_bg_tex (what glass samples)
-      if (g_blurp /= 0 .and. g_bgw > 0) then
-         call p_bind_fbo(GL_FRAMEBUFFER, g_bg_fbo2)
-         call p_attach_tex(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, &
-                           g_bg_tmp, 0_c_int)
-         call p_viewport(0_c_int, 0_c_int, int(g_bgw, c_int), int(g_bgh, c_int))
-         call p_use(g_blurp)
-         call p_active_tex(GL_TEXTURE0)
-         call p_bind_tex(GL_TEXTURE_2D, g_scene_tex)
-         if (g_u_blur_tex >= 0) call p_uniform1i(int(g_u_blur_tex, c_int), 0_c_int)
-         if (g_u_blur_dir >= 0) call p_uniform2f(int(g_u_blur_dir, c_int), &
-                                                 1.4_c_float/real(g_bgw, c_float), 0.0_c_float)
-         call draw_quad(g_blurp)
-
-         call p_bind_fbo(GL_FRAMEBUFFER, g_bg_fbo)
-         call p_attach_tex(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, &
-                           g_bg_tex, 0_c_int)
-         call p_bind_tex(GL_TEXTURE_2D, g_bg_tmp)
-         if (g_u_blur_dir >= 0) call p_uniform2f(int(g_u_blur_dir, c_int), &
-                                                 0.0_c_float, 1.4_c_float/real(g_bgh, c_float))
-         call draw_quad(g_blurp)
-      end if
-
-      ! 4. back to the frame we were drawing into
-      if (g_fbo /= 0) then
-         call p_bind_fbo(GL_FRAMEBUFFER, g_fbo)
-      else
-         call p_bind_fbo(GL_FRAMEBUFFER, 0_c_int)
-      end if
-      call p_viewport(0_c_int, 0_c_int, int(width*g_ss, c_int), int(height*g_ss, c_int))
-      if (.false.) print *, i
-   end subroutine gl_capture
    !> Resolve the offscreen target onto the window and unbind it.
    subroutine gl_resolve(self)
       class(ui_gl_backend), intent(inout) :: self
@@ -928,14 +872,17 @@ contains
       if (g_bg_tex == 0) then
          call p_gen_tex(1_c_int, g_bg_tex)
          call p_gen_tex(1_c_int, g_bg_tmp)
+         call p_gen_tex(1_c_int, g_wall_tex)
          call p_gen_fbo(1_c_int, g_bg_fbo)
          call p_gen_fbo(1_c_int, g_bg_fbo2)
       end if
-      do i = 1, 2
+      do i = 1, 3
          if (i == 1) then
             call p_bind_tex(GL_TEXTURE_2D, g_bg_tex)
-         else
+         else if (i == 2) then
             call p_bind_tex(GL_TEXTURE_2D, g_bg_tmp)
+         else
+            call p_bind_tex(GL_TEXTURE_2D, g_wall_tex)
          end if
          call p_tex_param(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_F)
          call p_tex_param(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR_F)
@@ -991,15 +938,15 @@ contains
    subroutine bg_render(w, h)
       integer, intent(in) :: w, h
       real(c_float) :: dx, dy
-      integer :: iter
 
       if (.not. g_ready .or. g_wallp == 0) return
       if (.not. associated(p_gen_fbo)) return
       call bg_alloc(w, h)
 
-      ! 1. animate the wallpaper into g_bg_tex
+      ! 1. animate the wallpaper into g_wall_tex (its own texture, so the
+      !    scene capture used by glass cannot clobber it)
       call p_bind_fbo(GL_FRAMEBUFFER, g_bg_fbo)
-      call p_attach_tex(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_bg_tex, 0_c_int)
+      call p_attach_tex(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_wall_tex, 0_c_int)
       call p_viewport(0_c_int, 0_c_int, int(g_bgw, c_int), int(g_bgh, c_int))
       call p_clear(GL_COLOR_BUFFER_BIT)
       call p_use(g_wallp)
@@ -1009,29 +956,26 @@ contains
                                               real(g_bgw, c_float), real(g_bgh, c_float))
       call draw_quad(g_wallp)
 
-      ! 2/3. separable gaussian, run twice with a wider step. This is the
-      ! trick from blur-my-shell: brute force the sigma by repeating the
-      ! H/V pair instead of using a huge kernel in one pass.
+      ! 2. horizontal blur into g_bg_tmp
+      call p_bind_fbo(GL_FRAMEBUFFER, g_bg_fbo2)
+      call p_attach_tex(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_bg_tmp, 0_c_int)
       call p_use(g_blurp)
       call p_active_tex(GL_TEXTURE0)
+      call p_bind_tex(GL_TEXTURE_2D, g_wall_tex)
       if (g_u_blur_tex >= 0) call p_uniform1i(int(g_u_blur_tex, c_int), 0_c_int)
-      do iter = 1, 3
-         call p_bind_fbo(GL_FRAMEBUFFER, g_bg_fbo2)
-         call p_attach_tex(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, &
-                           g_bg_tmp, 0_c_int)
-         call p_bind_tex(GL_TEXTURE_2D, g_bg_tex)
-         if (g_u_blur_dir >= 0) call p_uniform2f(int(g_u_blur_dir, c_int), &
-                                                 2.4_c_float/real(g_bgw, c_float), 0.0_c_float)
-         call draw_quad(g_blurp)
+      dx = 1.6_c_float/real(g_bgw, c_float)
+      dy = 0.0_c_float
+      if (g_u_blur_dir >= 0) call p_uniform2f(int(g_u_blur_dir, c_int), dx, dy)
+      call draw_quad(g_blurp)
 
-         call p_bind_fbo(GL_FRAMEBUFFER, g_bg_fbo)
-         call p_attach_tex(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, &
-                           g_bg_tex, 0_c_int)
-         call p_bind_tex(GL_TEXTURE_2D, g_bg_tmp)
-         if (g_u_blur_dir >= 0) call p_uniform2f(int(g_u_blur_dir, c_int), &
-                                                 0.0_c_float, 2.4_c_float/real(g_bgh, c_float))
-         call draw_quad(g_blurp)
-      end do
+      ! 3. vertical blur back into g_wall_tex
+      call p_bind_fbo(GL_FRAMEBUFFER, g_bg_fbo)
+      call p_bind_tex(GL_TEXTURE_2D, g_bg_tmp)
+      dx = 0.0_c_float
+      dy = 1.6_c_float/real(g_bgh, c_float)
+      if (g_u_blur_dir >= 0) call p_uniform2f(int(g_u_blur_dir, c_int), dx, dy)
+      call draw_quad(g_blurp)
+
       ! 4. back to the main target
       if (g_fbo /= 0) then
          call p_bind_fbo(GL_FRAMEBUFFER, g_fbo)
